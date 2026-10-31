@@ -1,0 +1,9 @@
+Package: com.example.barkautocopy
+Name: Bark Auto Copy
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: Bark 推送验证码自动复制到剪贴板（锁屏/横幅/通知中心）
+Maintainer: you <you@example.com>
+Author: you <you@example.com>
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0), firmware (<< 18.0)
