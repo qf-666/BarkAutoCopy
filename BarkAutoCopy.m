@@ -8,19 +8,18 @@
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
 
+#define ACVLOG(fmt, ...) NSLog(@"[BarkAutoCopy] " fmt, ##__VA_ARGS__)
+
 // ---------- 开关 ----------
 static BOOL gBarkOnly = YES;               // YES=只处理 Bark 通知；NO=对所有带验证码的通知生效
 static NSTimeInterval gDedupWindow = 10.0; // 相同验证码 X 秒内只写一次剪贴板
 
 // ---------- Bark 识别 ----------
-// Bark 服务端会把 url/copy/autoCopy/group/level/isArchive/badge 等自定义字段塞进 APNs 负载，
-// 到端上就是 content.userInfo 的 key。命中任一 key 即认定为 Bark 推送。
+// 特征 1：bark-server 所有推送（含裸推）aps.category 恒为 myNotificationCategory
+// 特征 2：userInfo 里的 Bark 自定义字段（官方文档参数）
+// 特征 3：标题兜底
 static BOOL ACVIsBarkContent(UNNotificationContent *c) {
-    // 特征 1：Bark 专属通知类别。bark-server 所有推送（含裸推）aps.category 恒为
-    // myNotificationCategory，落到设备即 content.categoryIdentifier，与是否传参无关。
     if ([c.categoryIdentifier isEqualToString:@"myNotificationCategory"]) return YES;
-
-    // 特征 2：userInfo 里的 Bark 自定义字段（官方文档参数：url/copy/group/level/isArchive/badge/id 等）
     NSDictionary *ui = c.userInfo ?: @{};
     static NSSet *barkKeys;
     static dispatch_once_t once;
@@ -33,8 +32,6 @@ static BOOL ACVIsBarkContent(UNNotificationContent *c) {
     for (NSString *k in ui) {
         if ([barkKeys containsObject:k]) return YES;
     }
-
-    // 特征 3：标题兜底
     NSString *title = c.title ?: @"";
     return [title isEqualToString:@"Bark"];
 }
@@ -69,33 +66,71 @@ static NSString *ACVExtractCode(NSString *text) {
 static NSString *gLastCode = nil;
 static NSTimeInterval gLastTs = 0;
 static void ACVCopyCode(NSString *code) {
-    if (!code.length) return;
+    if (!code.length) {
+        ACVLOG(@"copy: no code to copy");
+        return;
+    }
     @synchronized ([NSObject class]) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        if (gLastCode && [gLastCode isEqualToString:code] && (now - gLastTs) < gDedupWindow) return;
+        if (gLastCode && [gLastCode isEqualToString:code] && (now - gLastTs) < gDedupWindow) {
+            ACVLOG(@"copy: dedup skipped %@", code);
+            return;
+        }
         gLastCode = code;
         gLastTs = now;
     }
     // 主线程写剪贴板，避免 UIPasteboard 跨线程问题
     dispatch_async(dispatch_get_main_queue(), ^{
+        ACVLOG(@"copy: writing to pasteboard: %@", code);
         [UIPasteboard generalPasteboard].string = code;
+        ACVLOG(@"copy: pasteboard now = %@", [UIPasteboard generalPasteboard].string);
     });
 }
 
 // ---------- 主挂点 ----------
 // NCNotificationRequest 是 NotificationCenter 私有框架里"一条通知"的包装对象。
 // SpringBoard 展示任何通知（锁屏、横幅、通知中心）前都要经 initWithNotificationRequest:
-// 构造一次 —— 这就是单点截获的漏斗。
+// 构造一次 —— 单点截获的漏斗。
 static id (*orig_initWithNotificationRequest)(id, SEL, id);
 static id hook_initWithNotificationRequest(id self, SEL _cmd, id req) {
     id result = orig_initWithNotificationRequest(self, _cmd, req);
     @autoreleasepool {
+        ACVLOG(@"hook fired, req class=%@", NSStringFromClass([req class]));
         if ([req isKindOfClass:NSClassFromString(@"UNNotificationRequest")]) {
             UNNotificationRequest *r = (UNNotificationRequest *)req;
             UNNotificationContent *c = r.content;
-            if (!c) return result;
-            if (gBarkOnly && !ACVIsBarkContent(c)) return result;
+            if (!c) {
+                ACVLOG(@"content nil, drop");
+                return result;
+            }
+            ACVLOG(@"ident=%@ category=%@ title=%@ body=%@ userInfoKeys=%@",
+                   r.identifier ?: @"(nil)",
+                   c.categoryIdentifier ?: @"(nil)",
+                   c.title ?: @"(nil)",
+                   c.body ?: @"(nil)",
+                   [c.userInfo allKeys] ?: @[]);
+            BOOL isBark = ACVIsBarkContent(c);
+            ACVLOG(@"isBark=%d gBarkOnly=%d", isBark, gBarkOnly);
+            if (gBarkOnly && !isBark) {
+                ACVLOG(@"not Bark, skip");
+                return result;
+            }
             NSString *code = ACVExtractCode(c.body) ?: ACVExtractCode(c.title);
+            ACVLOG(@"extracted=%@", code ?: @"(none)");
+            ACVCopyCode(code);
+        } else if ([req isKindOfClass:NSClassFromString(@"UNNotification")]) {
+            // 部分系统版本的备选入口：直接传 UNNotification
+            UNNotification *n = (UNNotification *)req;
+            UNNotificationRequest *r = n.request;
+            UNNotificationContent *c = r.content;
+            if (!c) return result;
+            ACVLOG(@"[UNNotification] category=%@ title=%@ body=%@",
+                   c.categoryIdentifier ?: @"(nil)", c.title ?: @"(nil)", c.body ?: @"(nil)");
+            BOOL isBark = ACVIsBarkContent(c);
+            ACVLOG(@"isBark=%d gBarkOnly=%d", isBark, gBarkOnly);
+            if (gBarkOnly && !isBark) return result;
+            NSString *code = ACVExtractCode(c.body) ?: ACVExtractCode(c.title);
+            ACVLOG(@"extracted=%@", code ?: @"(none)");
             ACVCopyCode(code);
         }
     }
@@ -106,11 +141,22 @@ __attribute__((constructor))
 static void BarkAutoCopyInit(void) {
     @autoreleasepool {
         Class cls = NSClassFromString(@"NCNotificationRequest");
+        ACVLOG(@"init: NCNotificationRequest %@", cls ? @"found" : @"MISSING");
         if (cls) {
-            MSHookMessageEx(cls,
-                NSSelectorFromString(@"initWithNotificationRequest:"),
-                (IMP)hook_initWithNotificationRequest,
-                (IMP *)&orig_initWithNotificationRequest);
+            SEL sel = NSSelectorFromString(@"initWithNotificationRequest:");
+            if ([cls instancesRespondToSelector:sel]) {
+                MSHookMessageEx(cls, sel, (IMP)hook_initWithNotificationRequest,
+                                (IMP *)&orig_initWithNotificationRequest);
+                ACVLOG(@"init: hooked initWithNotificationRequest:");
+            } else {
+                ACVLOG(@"init: NOT respond to initWithNotificationRequest:");
+            }
+            SEL alt = NSSelectorFromString(@"initWithNotification:");
+            if ([cls instancesRespondToSelector:alt]) {
+                MSHookMessageEx(cls, alt, (IMP)hook_initWithNotificationRequest,
+                                (IMP *)&orig_initWithNotificationRequest);
+                ACVLOG(@"init: hooked initWithNotification:");
+            }
         }
     }
 }
