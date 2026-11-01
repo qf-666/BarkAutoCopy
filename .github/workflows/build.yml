@@ -43,17 +43,13 @@ jobs:
           make || echo "stage/package 预期失败（fakeroot 与 arm64e 宿主冲突），编译与签名已完成"
           find .theos -name '*.dylib' -type f
 
-      - name: Assemble rootless deb (双路径：有根+无根通吃；手动打 deb 绕开 fakeroot 冲突)
+      - name: Assemble rootless deb (仅无根 /var/jb；手动打 deb 绕开 fakeroot 冲突)
         run: |
           DYLIB=$(find .theos -name 'BarkAutoCopy.dylib' -type f | head -1)
           echo "DYLIB=$DYLIB"
-          mkdir -p _deb/DEBIAN \
-                   _deb/var/jb/Library/MobileSubstrate/DynamicLibraries \
-                   _deb/Library/MobileSubstrate/DynamicLibraries
+          mkdir -p _deb/DEBIAN _deb/var/jb/Library/MobileSubstrate/DynamicLibraries
           cp "$DYLIB" _deb/var/jb/Library/MobileSubstrate/DynamicLibraries/
-          cp "$DYLIB" _deb/Library/MobileSubstrate/DynamicLibraries/
           cp BarkAutoCopy.plist _deb/var/jb/Library/MobileSubstrate/DynamicLibraries/
-          cp BarkAutoCopy.plist _deb/Library/MobileSubstrate/DynamicLibraries/
           cp control _deb/DEBIAN/control
           VER=$(awk '/^Version:/{print $2}' control)
           mkdir -p dist
