@@ -10,7 +10,8 @@ Bark 推送验证码自动复制到剪贴板的越狱插件（注入 SpringBoard
 `initWithNotificationRequest:` 方法 —— SpringBoard 展示任何一条通知前
 必然构造该对象，这是锁屏/横幅/通知中心的唯一漏斗。
 
-- 识别 Bark：`userInfo` 命中 Bark 自定义字段（url/copy/autoCopy/group/level/isArchive/badge）或标题为 "Bark"
+- 适配 iOS 16+：该方法的入参是 `NCMutableNotificationRequest` / `NCNotificationRequest`
+  本体（非 `UNNotificationRequest`），故用运行时反射挖取全部字符串属性
 - 提码：关键字正则（验证码/校验码/动态码/code/OTP… + 4~8 位数字），兜底认纯数字正文
 - 写板：`UIPasteboard.generalPasteboard`，10 秒去重窗口
 
