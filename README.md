@@ -12,6 +12,7 @@ Bark 推送验证码自动复制到剪贴板的越狱插件（注入 SpringBoard
 
 - 适配 iOS 16+：该方法的入参是 `NCMutableNotificationRequest` / `NCNotificationRequest`
   本体（非 `UNNotificationRequest`），故用运行时反射挖取全部字符串属性
+- 只认 Bark：按 `categoryIdentifier == myNotificationCategory` 过滤，其余 App 通知直接放行
 - 提码：关键字正则（验证码/校验码/动态码/code/OTP… + 4~8 位数字），兜底认纯数字正文
 - 写板：`UIPasteboard.generalPasteboard`，10 秒去重窗口
 
@@ -65,8 +66,9 @@ curl -X POST "https://api.day.app/push" -H "Content-Type: application/json" \
 
 改 `BarkAutoCopy.m` 顶部开关后重新构建：
 
-- `gBarkOnly = YES`：只处理 Bark 通知（识别：category=myNotificationCategory / userInfo Bark 字段 / 标题 Bark）；改 `NO` 对所有带验证码的通知生效
 - `gDedupWindow = 10.0`：相同验证码的写入去重窗口（秒）
+- 默认**只认 Bark 通知**（`categoryIdentifier == myNotificationCategory`）；如需对所有 App 生效，
+  删掉 `ACVProcessRequestObject` 里开头的 `if (!ACVIsBarkCategory(req)) return;` 一行即可
 
 ## 目录结构
 
