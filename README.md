@@ -46,21 +46,25 @@ dpkg -i /var/jb/tmp/com.example.barkautocopy_0.0.1_iphoneos-arm64.deb
 sbreload        # 或 killall -9 SpringBoard
 ```
 
-## Bark 推送格式示例
+## Bark 推送格式示例（官方文档：https://bark.day.app/#/params）
 
 ```bash
-# 正文直推验证码
-curl "https://api.day.app/你的KEY/123456"
+# GET：正文直接放路径里（裸推也能识别，插件靠 category=myNotificationCategory 认 Bark）
+curl "https://api.day.app/你的KEY/验证码123456"
 
-# 带关键字（更稳，不会被误判）
-curl -X POST "https://api.day.app/你的KEY" -d 'title=Bark&body=验证码123456，5分钟内有效'
+# POST 表单：标题+正文分开
+curl -X POST "https://api.day.app/你的KEY" -d 'title=验证码' -d 'body=123456'
+
+# JSON：走 /push 端点
+curl -X POST "https://api.day.app/push" -H "Content-Type: application/json" \
+  -d '{"device_key":"你的KEY","title":"验证码","body":"123456","level":"timeSensitive"}'
 ```
 
 ## 配置
 
 改 `BarkAutoCopy.m` 顶部开关后重新构建：
 
-- `gBarkOnly = YES`：只处理 Bark 通知；改 `NO` 对所有带验证码的通知生效
+- `gBarkOnly = YES`：只处理 Bark 通知（识别：category=myNotificationCategory / userInfo Bark 字段 / 标题 Bark）；改 `NO` 对所有带验证码的通知生效
 - `gDedupWindow = 10.0`：相同验证码的写入去重窗口（秒）
 
 ## 目录结构

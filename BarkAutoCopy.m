@@ -16,19 +16,27 @@ static NSTimeInterval gDedupWindow = 10.0; // 相同验证码 X 秒内只写一�
 // Bark 服务端会把 url/copy/autoCopy/group/level/isArchive/badge 等自定义字段塞进 APNs 负载，
 // 到端上就是 content.userInfo 的 key。命中任一 key 即认定为 Bark 推送。
 static BOOL ACVIsBarkContent(UNNotificationContent *c) {
+    // 特征 1：Bark 专属通知类别。bark-server 所有推送（含裸推）aps.category 恒为
+    // myNotificationCategory，落到设备即 content.categoryIdentifier，与是否传参无关。
+    if ([c.categoryIdentifier isEqualToString:@"myNotificationCategory"]) return YES;
+
+    // 特征 2：userInfo 里的 Bark 自定义字段（官方文档参数：url/copy/group/level/isArchive/badge/id 等）
     NSDictionary *ui = c.userInfo ?: @{};
     static NSSet *barkKeys;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         barkKeys = [NSSet setWithArray:@[
-            @"url", @"copy", @"autoCopy", @"isArchive", @"group", @"level", @"badge"
+            @"url", @"copy", @"autoCopy", @"isArchive", @"group", @"level",
+            @"badge", @"id", @"device_key"
         ]];
     });
     for (NSString *k in ui) {
         if ([barkKeys containsObject:k]) return YES;
     }
+
+    // 特征 3：标题兜底
     NSString *title = c.title ?: @"";
-    return [title isEqualToString:@"Bark"]; // 默认标题兜底
+    return [title isEqualToString:@"Bark"];
 }
 
 // ---------- 验证码提取 ----------
