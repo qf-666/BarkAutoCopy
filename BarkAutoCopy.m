@@ -1,6 +1,8 @@
 // BarkAutoCopy.m
 // Bark 推送验证码 → 剪贴板（注入 SpringBoard，覆盖锁屏/横幅/通知中心）
-// v0.0.3 诊断版：全链路写文件 /var/mobile/Documents/barkautocopy_debug.txt
+// v0.0.4：适配 iOS 16+ 通知模型 —— initWithNotificationRequest: 的参数是
+// NCMutableNotificationRequest / NCNotificationRequest 本体（非 UNNotificationRequest）。
+// 用运行时反射挖属性找验证码，诊断写 /var/mobile/Documents/barkautocopy_debug.txt
 
 #import <substrate.h>
 #import <objc/runtime.h>
@@ -11,8 +13,9 @@
 #define ACVLOG(fmt, ...) NSLog(@"[BarkAutoCopy] " fmt, ##__VA_ARGS__)
 
 // ---------- 开关 ----------
-static BOOL gBarkOnly = NO;                // 0.0.3 诊断版：对全部通知生效，先排除识别因素
+static BOOL gBarkOnly = NO;                // 0.0.4 诊断期：对全部通知生效
 static NSTimeInterval gDedupWindow = 10.0; // 相同验证码 X 秒内只写一次剪贴板
+static int gDetailBudget = 30;             // 详细日志条数上限，防刷屏
 
 // ---------- 诊断文件（Filza 打开 /var/mobile/Documents/barkautocopy_debug.txt） ----------
 static NSString *ACVDebugPath(void) {
@@ -41,23 +44,14 @@ static void ACVDebug(NSString *fmt, ...) {
     NSLog(@"[BarkAutoCopy] %@", msg);
 }
 
-// ---------- Bark 识别 ----------
-static BOOL ACVIsBarkContent(UNNotificationContent *c) {
-    if ([c.categoryIdentifier isEqualToString:@"myNotificationCategory"]) return YES;
-    NSDictionary *ui = c.userInfo ?: @{};
-    static NSSet *barkKeys;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        barkKeys = [NSSet setWithArray:@[
-            @"url", @"copy", @"autoCopy", @"isArchive", @"group", @"level",
-            @"badge", @"id", @"device_key"
-        ]];
-    });
-    for (NSString *k in ui) {
-        if ([barkKeys containsObject:k]) return YES;
-    }
-    NSString *title = c.title ?: @"";
-    return [title isEqualToString:@"Bark"];
+static void ACVDebugLimited(NSString *fmt, ...) {
+    if (gDetailBudget <= 0) return;
+    gDetailBudget--;
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    ACVDebug(@"%@", msg);
 }
 
 // ---------- 验证码提取 ----------
@@ -90,13 +84,13 @@ static NSString *gLastCode = nil;
 static NSTimeInterval gLastTs = 0;
 static void ACVCopyCode(NSString *code) {
     if (!code.length) {
-        ACVDebug(@"copy: 无码可复制");
+        ACVDebugLimited(@"copy: 无码可复制");
         return;
     }
     @synchronized ([NSObject class]) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (gLastCode && [gLastCode isEqualToString:code] && (now - gLastTs) < gDedupWindow) {
-            ACVDebug(@"copy: 去重跳过 %@", code);
+            ACVDebugLimited(@"copy: 去重跳过 %@", code);
             return;
         }
         gLastCode = code;
@@ -117,69 +111,105 @@ static NSMutableSet *ACVSeenSet(void) {
     return s;
 }
 static BOOL ACVAlreadyProcessed(NSString *ident) {
-    if (!ident) ident = @"";
+    if (!ident.length) return NO; // 无标识的不去重
     NSMutableSet *s = ACVSeenSet();
     @synchronized (s) {
         if ([s containsObject:ident]) return YES;
-        if (s.count > 100) [s removeAllObjects];
+        if (s.count > 200) [s removeAllObjects];
         [s addObject:ident];
     }
     return NO;
 }
 
-// ---------- 统一处理 ----------
-static void ACVProcessNotificationRequest(id req, NSString *via) {
+// ---------- 运行时反射工具 ----------
+static NSArray *ACVPropertyNames(Class cls) {
+    NSMutableArray *names = [NSMutableArray array];
+    unsigned int count = 0;
+    objc_property_t *props = class_copyPropertyList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        const char *n = property_getName(props[i]);
+        if (n) [names addObject:[NSString stringWithUTF8String:n]];
+    }
+    free(props);
+    Class sup = class_getSuperclass(cls);
+    if (sup && sup != NSClassFromString(@"NSObject")) {
+        [names addObjectsFromArray:ACVPropertyNames(sup)];
+    }
+    return names;
+}
+
+static id ACVValueForKey(id obj, NSString *key) {
+    @try { return [obj valueForKey:key]; }
+    @catch (NSException *e) { return nil; }
+}
+
+// 递归收集对象里的字符串（深度 ≤1），标题正文藏哪都能挖出来
+static void ACVCollectStrings(id obj, int depth, NSMutableArray *out) {
+    if (!obj) return;
+    if ([obj isKindOfClass:NSClassFromString(@"NSString")]) {
+        if ([obj length]) [out addObject:obj];
+        return;
+    }
+    if ([obj isKindOfClass:NSClassFromString(@"NSNumber")]) return;
+    if ([obj isKindOfClass:NSClassFromString(@"NSDate")]) return;
+    if (depth > 1) return;
+    if ([obj isKindOfClass:NSClassFromString(@"NSDictionary")]) {
+        for (id k in [obj allKeys]) {
+            ACVCollectStrings([obj objectForKey:k], depth + 1, out);
+        }
+        return;
+    }
+    if ([obj isKindOfClass:NSClassFromString(@"NSArray")]) {
+        for (id v in obj) ACVCollectStrings(v, depth + 1, out);
+        return;
+    }
+    // 一般对象：反射属性
+    Class cls = [obj class];
+    NSArray *props = ACVPropertyNames(cls);
+    for (NSString *key in props) {
+        ACVCollectStrings(ACVValueForKey(obj, key), depth + 1, out);
+    }
+}
+
+// ---------- 统一处理（兼容新旧通知模型） ----------
+static void ACVProcessRequestObject(id req, NSString *via) {
     @autoreleasepool {
-        if (![req isKindOfClass:NSClassFromString(@"UNNotificationRequest")]) {
-            ACVDebug(@"[%@] req 类型=%@（非 UNNotificationRequest）", via, NSStringFromClass([req class]));
-            return;
+        NSString *ident = ACVValueForKey(req, @"notificationIdentifier");
+        if (![ident isKindOfClass:NSClassFromString(@"NSString")]) ident = nil;
+        if (ACVAlreadyProcessed(ident)) return;
+
+        Class cls = [req class];
+        NSArray *props = ACVPropertyNames(cls);
+        ACVDebugLimited(@"[%@] 类型=%@", via, NSStringFromClass(cls));
+        ACVDebugLimited(@"  属性清单: %@", [props componentsJoinedByString:@", "]);
+
+        NSMutableArray *strings = [NSMutableArray array];
+        ACVCollectStrings(req, 0, strings);
+
+        NSString *code = nil;
+        for (NSString *t in strings) {
+            code = ACVExtractCode(t);
+            if (code) break;
         }
-        UNNotificationRequest *r = (UNNotificationRequest *)req;
-        UNNotificationContent *c = r.content;
-        if (!c) {
-            ACVDebug(@"[%@] content 为空", via);
-            return;
-        }
-        if (ACVAlreadyProcessed(r.identifier)) return;
-        ACVDebug(@"[%@] ident=%@ category=%@ title=%@ body=%@ userInfoKeys=%@",
-                 via,
-                 r.identifier ?: @"(nil)",
-                 c.categoryIdentifier ?: @"(nil)",
-                 c.title ?: @"(nil)",
-                 c.body ?: @"(nil)",
-                 [c.userInfo allKeys] ?: @[]);
-        BOOL isBark = ACVIsBarkContent(c);
-        if (gBarkOnly && !isBark) {
-            ACVDebug(@"非 Bark（gBarkOnly=YES），跳过");
-            return;
-        }
-        NSString *code = ACVExtractCode(c.body) ?: ACVExtractCode(c.title) ?: ACVExtractCode(c.subtitle);
-        ACVDebug(@"isBark=%d 提取=%@", isBark, code ?: @"(none)");
+        ACVDebug(@"via=%@ type=%@ ident=%@ 挖到字符串=%lu 个，提取=%@",
+                 via, NSStringFromClass(cls), ident ?: @"(nil)",
+                 (unsigned long)strings.count, code ?: @"(none)");
         ACVCopyCode(code);
     }
 }
 
-// ---------- 挂点 1：NCNotificationRequest 初始化（经典漏斗） ----------
+// ---------- 挂点：NCNotificationRequest 初始化（iOS 15-17 通知漏斗，实测每发必触发） ----------
 static id (*orig_initReq)(id, SEL, id);
 static id hook_initReq(id self, SEL _cmd, id req) {
     id result = orig_initReq(self, _cmd, req);
-    ACVDebug(@"hook: initWithNotificationRequest: 触发");
-    ACVProcessNotificationRequest(req, @"init");
+    if (req) ACVProcessRequestObject(req, @"init");
     return result;
-}
-
-// ---------- 挂点 2：notificationRequest getter（兜底，覆盖所有构造路径） ----------
-static id (*orig_getNotificationRequest)(id, SEL);
-static id hook_getNotificationRequest(id self, SEL _cmd) {
-    id r = orig_getNotificationRequest(self, _cmd);
-    ACVProcessNotificationRequest(r, @"getter");
-    return r;
 }
 
 __attribute__((constructor))
 static void BarkAutoCopyInit(void) {
     @autoreleasepool {
-        ACVDebug(@"=== v0.0.3 已加载，进程=%@ ===", [[NSProcessInfo processInfo] processName]);
+        ACVDebug(@"=== v0.0.4 已加载，进程=%@ ===", [[NSProcessInfo processInfo] processName]);
         Class cls = NSClassFromString(@"NCNotificationRequest");
         ACVDebug(@"NCNotificationRequest 类：%@", cls ? @"存在" : @"不存在");
         if (cls) {
@@ -189,13 +219,6 @@ static void BarkAutoCopyInit(void) {
                 ACVDebug(@"已挂 initWithNotificationRequest:");
             } else {
                 ACVDebug(@"该类没有 initWithNotificationRequest: 方法");
-            }
-            SEL s2 = NSSelectorFromString(@"notificationRequest");
-            if ([cls instancesRespondToSelector:s2]) {
-                MSHookMessageEx(cls, s2, (IMP)hook_getNotificationRequest, (IMP *)&orig_getNotificationRequest);
-                ACVDebug(@"已挂 notificationRequest getter");
-            } else {
-                ACVDebug(@"该类没有 notificationRequest getter");
             }
         }
     }
