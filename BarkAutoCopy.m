@@ -1,8 +1,7 @@
 // BarkAutoCopy.m
 // Bark 推送验证码 → 剪贴板（注入 SpringBoard，覆盖锁屏/横幅/通知中心）
-// v0.0.5 正式版：适配 iOS 16+ 通知模型 —— initWithNotificationRequest: 的参数是
-// NCMutableNotificationRequest / NCNotificationRequest 本体（非 UNNotificationRequest），
-// 用运行时反射挖属性字符串提取验证码。
+// v0.0.6：只认 Bark 通知（categoryIdentifier == myNotificationCategory），
+// 反射 NCNotificationRequest 属性字符串提取验证码。
 
 #import <substrate.h>
 #import <objc/runtime.h>
@@ -116,9 +115,22 @@ static void ACVCollectStrings(id obj, int depth, NSMutableArray *out) {
     }
 }
 
+// ---------- Bark 判定 ----------
+// Bark 所有推送（含裸推）aps.category 恒为 myNotificationCategory，
+// 落到设备即 content.categoryIdentifier；杂 App 通知没有这个值，据此精确过滤。
+static BOOL ACVIsBarkCategory(id req) {
+    id cat = ACVValueForKey(req, @"categoryIdentifier");
+    if ([cat isKindOfClass:NSClassFromString(@"NSString")]) {
+        return [cat isEqualToString:@"myNotificationCategory"];
+    }
+    return [ACVValueForKey(req, @"category") isEqualToString:@"myNotificationCategory"];
+}
+
 // ---------- 统一处理 ----------
 static void ACVProcessRequestObject(id req) {
     @autoreleasepool {
+        if (!ACVIsBarkCategory(req)) return; // 只认 Bark，其余通知直接放行
+
         NSString *ident = ACVValueForKey(req, @"notificationIdentifier");
         if (![ident isKindOfClass:NSClassFromString(@"NSString")]) ident = nil;
         if (ACVAlreadyProcessed(ident)) return;
