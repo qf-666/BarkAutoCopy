@@ -13,7 +13,8 @@
 #define ACVLOG(fmt, ...) NSLog(@"[BarkAutoCopy] " fmt, ##__VA_ARGS__)
 
 // ---------- 开关 ----------
-static BOOL gBarkOnly = NO;                // 0.0.4 诊断期：对全部通知生效
+// 诊断期对全部通知生效；后续要只认 Bark 时，在 ACVProcessRequestObject 里
+// 用 categoryIdentifier/userInfo 判定后 gBarkOnly 风格过滤即可。
 static NSTimeInterval gDedupWindow = 10.0; // 相同验证码 X 秒内只写一次剪贴板
 static int gDetailBudget = 30;             // 详细日志条数上限，防刷屏
 
