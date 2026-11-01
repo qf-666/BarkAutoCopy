@@ -51,8 +51,9 @@ jobs:
           cp "$DYLIB" _deb/var/jb/Library/MobileSubstrate/DynamicLibraries/
           cp BarkAutoCopy.plist _deb/var/jb/Library/MobileSubstrate/DynamicLibraries/
           cp control _deb/DEBIAN/control
+          VER=$(awk '/^Version:/{print $2}' control)
           mkdir -p dist
-          dpkg-deb --root-owner-group -Zxz -b _deb dist/com.example.barkautocopy_0.0.1_iphoneos-arm64.deb
+          dpkg-deb --root-owner-group -Zxz -b _deb dist/com.example.barkautocopy_${VER}_iphoneos-arm64.deb
           ls -la dist/
 
       - name: Upload DEB artifact
