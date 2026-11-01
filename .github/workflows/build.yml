@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-14
     env:
       THEOS: /Users/runner/theos
       HOMEBREW_NO_AUTO_UPDATE: 1
